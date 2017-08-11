@@ -1,88 +1,6 @@
-#include <gtk/gtk.h>
+#include "wcam.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <errno.h>
-#include <pthread.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 
-#define DEF_CONN_IP			"192.168.0.104"
-#define DEF_PORT			"19868"
-#define LOGO_IMG			"./icons/webcam_icon.png"
-#define LOGO_IMG1			"./icons/wcamclient.png"
-
-#define WIN_TITLE			"Web Camera"
-#define WIN_ICON			"./icons/icon.png"
-
-#define SNAP_BUTTON_IMG		"./icons/snap-icon-samll.xpm"
-#define SETTING_BUTTON_IMG	"./icons/settings.png"
-
-#define WCAM_VERSION		"Web Camera 2.0"
-#define WCAM_HOMEPAGE		"http://blog.csdn.net/u013181595"
-#define SNAPSHOT_PATH		IMGDIR
-
-#define FRAME_MAX_SZ		253
-#define VID_FRMAE_MAX_SZ	(0xFFFFF - FRAME_MAX_SZ)
-
-struct entry_win
-{
-	GtkWidget	*win;
-	GtkWidget	*ip_entry;
-	GtkWidget	*port_entry;
-	GtkWidget	*connect_button;
-	gboolean	connected;
-	int			sock;
-};
-
-typedef struct entry_win *entry_win_t;
-typedef void (*wc_img_porc_t)(const void *p, int size, void *arg);
-
-struct wcam_cli
-{
-	int 			sock;
-	pthread_t		tid;
-	bool			need_stop;
-	__u8			req[FRAME_MAX_SZ];
-	__u8			rsp[FRAME_MAX_SZ + VID_FRMAE_MAX_SZ];
-
-	wc_img_porc_t	proc;
-	void 			*arg;
-};
-
-typedef struct wcam_cli *wcc_t;
-
-struct wcam_win
-{
-	GtkWidget		*win;
-	wcc_t 			client;
-	entry_win_t		entry_win;
-
-	GtkWidget		*video_area;
-
-	guint32			video_format;
-	guint32			video_width;
-	guint32			video_height;
-	gboolean		video_fullscreen;
-	gboolean		need_snapshot;
-
-	gchar			ipaddr[24];
-
-	GtkWidget		*fps_label;
-	GtkWidget		*frmsize_label;
-	guint32			frm_cnt;
-	guint64			last_twenty_frm_us;
-
-	GtkWidget		*info_area;
-	GtkWidget		*button_area;
-	GtkWidget		*control_area_button;
-	GtkWidget		*control_area;
-};
 
 __u64 clock_get_time_us()
 {
@@ -91,6 +9,76 @@ __u64 clock_get_time_us()
 
 	return (__u64)ts.tv_sec * 1000000LL + (__u64)ts.tv_nsec / 1000LL;
 }
+
+
+void draw_video_frame(const void *p, int size, void *arg)
+{
+    struct wcam_win *c      = arg;
+    GdkPixbufLoader *pixbuf_loader;
+    GdkPixbuf       *pixbuf;
+    GdkPixbuf       *pixbuf4fullscreen = NULL;
+    GdkScreen       *screen;
+    cairo_t         *cr;
+    gchar           outstr[100];
+    gfloat          fps; 
+    guint64         now_us;
+
+    gdk_threads_enter();
+    
+    /* update frame size label */
+    sprintf(outstr, "%d 字节", size);
+    gtk_label_set_text(GTK_LABEL(c->frmsize_label), outstr);
+
+    /* update fps label */
+    c->frm_cnt++;
+    if (c->frm_cnt == 1) {
+        c->last_twenty_frm_us = clock_get_time_us();
+    } else if (c->frm_cnt > 10) {
+        now_us = clock_get_time_us();
+        fps = 10.0 * 1000000.0 / (now_us - c->last_twenty_frm_us);
+        c->frm_cnt = 0;
+        sprintf(outstr, "%2.1f 帧/秒", fps);
+        gtk_label_set_text(GTK_LABEL(c->fps_label), outstr);
+    }
+
+    /* update video */
+    pixbuf_loader = gdk_pixbuf_loader_new(); 		
+    gdk_pixbuf_loader_write(pixbuf_loader, p, size, NULL); 
+    gdk_pixbuf_loader_close(pixbuf_loader, NULL); 
+    pixbuf = gdk_pixbuf_loader_get_pixbuf(pixbuf_loader); 
+
+    /*????cairo*/
+    cr = gdk_cairo_create(c->video_area->window);
+    gdk_cairo_set_source_pixbuf(cr, pixbuf, 0, 0);
+
+    cairo_paint(cr);
+    cairo_destroy(cr);
+
+    g_object_unref(pixbuf_loader);
+    if (pixbuf4fullscreen)
+        g_object_unref(pixbuf4fullscreen);
+        
+	gdk_threads_leave();
+
+    if (c->need_snapshot) {     /* Maybe we should open a file_save_dialog here */
+        char img_path[100];     /* or maybe we should make the image_storage_path Configurable */ 
+        FILE *fp;               
+        time_t t;
+        struct tm *tmp;
+        t = time(NULL);
+        tmp = localtime(&t);
+
+        strftime(outstr, sizeof(outstr), "%F-%T", tmp);
+        printf(SNAPSHOT_PATH"/webcam-%s.jpg\n", outstr);
+        printf(SNAPSHOT_PATH"/webcam-%s.jpg", outstr);
+        sprintf(img_path, SNAPSHOT_PATH"/webcam-%s.jpg", outstr);
+        fp = fopen(img_path, "w");        
+        fwrite(p, size, 1, fp);
+        fclose(fp);
+        c->need_snapshot = FALSE;
+    }
+}
+
 
 /*建立和服务器的连接*/
 static void connect_handler(GtkButton *button, gpointer data)
@@ -103,7 +91,12 @@ static void connect_handler(GtkButton *button, gpointer data)
 	ip = gtk_entry_get_text(GTK_ENTRY(c->ip_entry));
 	port = atoi(gtk_entry_get_text(GTK_ENTRY(c->port_entry)));
 
-	c->connected = TRUE;
+	c->sock = tcp_init_net(ip, port);
+
+	if(c->sock == -1)
+		c->connected = FALSE;
+	else
+		c->connected = TRUE;
 	gtk_main_quit();
 }
 
@@ -541,6 +534,7 @@ gint main(gint argc, gchar* argv[])
 	login_hide(c->entry_win);
 
 	//创建主工作页面
+	net_sys_init(c);
 	main_create(c);
 	main_run();
 err_win:

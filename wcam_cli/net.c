@@ -95,6 +95,8 @@ void net_sys_init(struct wcam_win *c)
 	struct wcam_cli *client;
 
 	client  = calloc(1, sizeof(struct wcam_cli));
+
+	//初始化client结构
 	client->stop = false;
 	client->arg = c;
 	client->sock = c->entry_win->sock;

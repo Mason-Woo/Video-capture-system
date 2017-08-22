@@ -1,13 +1,13 @@
 BIN = wcamsrv
-INC = -Iinclude/
+INC = -Iinclude/  
 SRC = $(wildcard *.c)
 OBJS = $(patsubst %.c, %.o, $(SRC))
 
-CC = arm-linux-gcc
-CFLAGS = $(INC) -g
+CC = gcc
+CFLAGS = $(INC)
 
 $(BIN):$(OBJS)
-	$(CC) -o $@ $^
+	$(CC) -o $@ $^   -g -lavformat -lavdevice -lavcodec 
 
 clean:
 	rm $(OBJS) $(BIN)

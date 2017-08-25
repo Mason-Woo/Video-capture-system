@@ -64,6 +64,10 @@ int epoll_del_event(int epfd, struct event_ext *ev)
 	return 0;
 }
 
+
+//主函数负责连接新的客户机
+//cam负责采集并压缩视频
+//net负责各个客户机的连接
 int main()
 {
 	struct epoll_event events[512];	

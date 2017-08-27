@@ -11,7 +11,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <sys/epoll.h>
-
+#include <netinet/tcp.h>
 #include "main.h"
 
 
@@ -118,8 +118,9 @@ void net_process(void *arg)
 	int i;
 	struct event_ext *e;
 	uint32_t event;
-
 	struct tcp_srv *s = arg;
+	struct tcp_info info;
+	int len = sizeof(info);
 
 	//申请并初始化一个sock结构
 	struct tcp_cli *c = calloc(1, sizeof(struct tcp_cli));
@@ -136,27 +137,37 @@ void net_process(void *arg)
 	//等待事件的发生，注意修改图片获取代码
 	while(1)
 	{
-		fds = epoll_wait(c->srv->epfd, events, 10, 1000);
-		for(i=0; i<fds; i++)
+		//检测客户机是否断开
+		getsockopt(c->sock, IPPROTO_TCP, TCP_INFO, &info, (socklen_t *)&len);
+		if((info.tcpi_state==TCP_ESTABLISHED))
 		{
-			event = events[i].events;
-			e = events[i].data.ptr;
+			fds = epoll_wait(c->srv->epfd, events, 10, 1000);
+			for(i=0; i<fds; i++)
+			{
+				event = events[i].events;
+				e = events[i].data.ptr;
 
-			if((event & EPOLLIN) && (e->events & EPOLLIN))
-			{
-				e->handler(e->fd, e->arg);
-			}
-			if((event & EPOLLOUT) && (e->events & EPOLLOUT))
-			{
-				e->handler(e->fd, e->arg);
-			}
-			if((event & EPOLLERR) && (e->events & EPOLLERR))
-			{
-				e->handler(e->fd, e->arg);
-			}
+				if((event & EPOLLIN) && (e->events & EPOLLIN))
+				{
+					e->handler(e->fd, e->arg);
+				}
+				if((event & EPOLLOUT) && (e->events & EPOLLOUT))
+				{
+					e->handler(e->fd, e->arg);
+				}
+				if((event & EPOLLERR) && (e->events & EPOLLERR))
+				{
+					e->handler(e->fd, e->arg);
+				}
+			}			
+		}
+		else
+		{
+			//关闭sock
+			close(c->sock);			
+			epoll_del_event(c->srv->epfd, c->ev_tx);
+			epoll_del_event(c->srv->epfd, c->ev_tx);
+			free(c);
 		}
 	}
-
-	//关闭sock
-	close(c->sock);
 }

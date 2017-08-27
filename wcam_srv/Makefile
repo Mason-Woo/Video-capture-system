@@ -3,7 +3,7 @@ INC = -Iinclude/
 SRC = $(wildcard *.c)
 OBJS = $(patsubst %.c, %.o,$(SRC))
 
-CC = gcc
+CC = arm-linux-gcc
 CFLAGS = $(INC) -g
 
 $(BIN):$(OBJS)

@@ -70,19 +70,15 @@ int build_ack(unsigned char *rsp, unsigned char type, unsigned char id,
 	return len+FRAME_HDR_SZ;
 }
 
-int net_sys_init()
+struct tcp_srv *net_sys_init()
 {
 	struct sockaddr_in addr;
 	struct sockaddr_in sin;
 	struct tcp_srv *s = calloc(1, sizeof(struct tcp_srv));
-	struct tcp_cli *c = calloc(1, sizeof(struct tcp_cli));
-
 	int new_sock;
 	int len;
 
-	//初始化传输子系统
-	s->epfd = srv_main->epfd;
-
+	s->epfd = epoll_create(20);
 	//socket
 	s->sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -93,14 +89,43 @@ int net_sys_init()
 	bind(s->sock, (struct sockaddr*)&addr, sizeof(struct sockaddr));
 
 	//listen
-	listen(s->sock, 5);
+	len = listen(s->sock, 10);
 
-	//accept
-	new_sock = accept(s->sock, (struct sockaddr*)&sin, &len);
-	c->sock = new_sock;
-	memcpy(&c->addr, &sin, len);
-	c->srv = s;
+	srv_main->sock = s->sock;
+	// //accept
+	// new_sock = accept(s->sock, (struct sockaddr*)&sin, &len);
+	// c->sock = new_sock;
+	// memcpy(&c->addr, &sin, len);
+	// c->srv = s;
 
+	// //将传输子系统的事件加入Epoll池,tcp_cli作为事件的参数
+	// c->ev_rx = epoll_event_create(c->sock, EPOLLIN, rx_app_handler, c);
+	// c->ev_tx = epoll_event_create(c->sock, EPOLLOUT, tx_app_handler, c);
+
+	// //先加入rx的事件
+	// epoll_add_event(c->srv->epfd, c->ev_rx);
+
+
+	return s;
+}
+
+void net_process(void *arg)
+{
+	//保存sock
+
+	struct epoll_event events[10];	
+	int fds;
+	int i;
+	struct event_ext *e;
+	uint32_t event;
+
+	struct tcp_srv *s = arg;
+
+	//申请并初始化一个sock结构
+	struct tcp_cli *c = calloc(1, sizeof(struct tcp_cli));
+
+	c->sock = s->new_sock;
+	c->srv = srv_main->srv;
 	//将传输子系统的事件加入Epoll池,tcp_cli作为事件的参数
 	c->ev_rx = epoll_event_create(c->sock, EPOLLIN, rx_app_handler, c);
 	c->ev_tx = epoll_event_create(c->sock, EPOLLOUT, tx_app_handler, c);
@@ -108,9 +133,30 @@ int net_sys_init()
 	//先加入rx的事件
 	epoll_add_event(c->srv->epfd, c->ev_rx);
 
-	//保存数据到srv_main中
-	srv_main->srv = s;
+	//等待事件的发生，注意修改图片获取代码
+	while(1)
+	{
+		fds = epoll_wait(c->srv->epfd, events, 10, 1000);
+		for(i=0; i<fds; i++)
+		{
+			event = events[i].events;
+			e = events[i].data.ptr;
 
-	//return s;
-	return 0;
+			if((event & EPOLLIN) && (e->events & EPOLLIN))
+			{
+				e->handler(e->fd, e->arg);
+			}
+			if((event & EPOLLOUT) && (e->events & EPOLLOUT))
+			{
+				e->handler(e->fd, e->arg);
+			}
+			if((event & EPOLLERR) && (e->events & EPOLLERR))
+			{
+				e->handler(e->fd, e->arg);
+			}
+		}
+	}
+
+	//关闭sock
+	close(c->sock);
 }

@@ -10,6 +10,7 @@
 #include <linux/videodev2.h>
 #include <stdlib.h>
 #include <math.h>
+#include <pthread.h> 
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <libavcodec/avcodec.h>
@@ -63,8 +64,12 @@ struct video_and_jpg{
 	AVStream* jpg_video_st;
 	AVFormatContext* jpg_pFormatCtx;
 
+	int got_picture;
+
 	unsigned char yuv4200[10000000];
 	unsigned char yuv4220[10000000];
+
+	char* jpg_filname;
 };
 
 struct cam
@@ -72,7 +77,9 @@ struct cam
 	struct v4l2_dev *v4_dev;//v4l2信息
 	struct buf tran_frm;//保存图像
 	struct video_and_jpg  *video;
+	int epfd;//摄像头子系统的epfd
 	__u32 tran_frm_max_size;//传输图像最大值
+	pthread_rwlock_t rwlock;
 };
 
 
@@ -158,8 +165,6 @@ void code_video(void *arg)
 	av_init_packet(&pkt);
 	pkt.data = NULL;
 	pkt.size = 0;
-
-//	printf("encoding frame %d-------", video->k);
 	
 	//编码一帧视频。即将AVFrame（存储YUV像素数据）编码为AVPacket（存储H.264等格式的码流数据）。
 	ret = avcodec_encode_video2(video->pCodecCtxEnc, &pkt, video->pFrameEnc,&(video->got_packet));
@@ -180,6 +185,48 @@ void code_video(void *arg)
 		printf("no frame output\n");
 	}
 	av_free_packet(&pkt);	
+
+
+
+	av_new_packet(&video->jpg_pkt,video->jpg_y_size*3);
+
+  
+	pthread_rwlock_wrlock (&(v->rwlock));
+	//打开输出文件
+	ret = avio_open(&video->jpg_pFormatCtx->pb, video->jpg_filname, AVIO_FLAG_READ_WRITE);
+	if (ret < 0) {
+		fprintf(stderr, "could not open '%s': %s\n", video->jpg_filname, av_err2str(ret));
+		exit(0);
+	}
+	//Write Header  
+	ret = avformat_write_header(video->jpg_pFormatCtx,NULL);  
+	if (ret < 0) {
+		fprintf(stderr, "error occurred when opening outputfile: %s\n",
+				av_err2str(ret));
+		exit(0);
+	}
+	//编码一帧图片
+	video->jpg_picture->data[0] = video->yuv4200;
+	video->jpg_picture->data[1] = video->yuv4200 + video->jpg_y_size;
+	video->jpg_picture->data[2] = video->yuv4200 + video->jpg_y_size * 5 / 4;
+    //Encode  
+    ret = avcodec_encode_video2(video->jpg_pCodecCtx, &video->jpg_pkt,video->jpg_picture,&video->got_picture);  
+    if(ret < 0){  
+        printf("Encode Error.\n");    
+    }  
+    if (video->got_picture==1){  
+        video->jpg_pkt.stream_index = video->jpg_video_st->index; 
+		video->jpg_pkt.pts = 1; 
+		video->jpg_video_st->cur_dts = 0;
+        ret = av_write_frame(video->jpg_pFormatCtx, &video->jpg_pkt);  
+        if (ret < 0)
+        	printf("av_write_frame error\n");
+    }   
+    //Write Trailer  
+    av_write_trailer(video->jpg_pFormatCtx);
+    avio_close(video->jpg_pFormatCtx->pb);
+    pthread_rwlock_unlock(&(v->rwlock));
+    av_free_packet(&video->jpg_pkt); 
 }
 
 /*事件处理函数*/
@@ -199,7 +246,6 @@ void cam_handler(int fd, void *arg)
 	//把采集到的图像编码进视频文件
 	code_video(v->arg);
 	
-
 	//从新入队列
 	ioctl(v->fd, VIDIOC_QBUF, &buf);
 }
@@ -271,10 +317,6 @@ struct v4l2_dev *v4l2_init()
 		buf.index 		= i;
 		ioctl(v->fd, VIDIOC_QBUF, &buf);
 	}
-	//往Epoll池中加入事件
-	v->ev = epoll_event_create(v->fd, EPOLLIN, cam_handler, v);
-	epoll_add_event(srv_main->epfd, v->ev);
-
 	return v;
 }
 
@@ -455,20 +497,19 @@ struct video_and_jpg *video_encode_init() {
 
 
 	/*从这里开始是图片编码的部分*/
-	char* jpg_filname = "test.jpg";	
+		
 	AVOutputFormat* jpg_fmt;	
 	AVCodec* jpg_pCodec;
 	int jpg_ret;
 	uint8_t* jpg_picture_buf;	
 	int jpg_size;
 
+	video->jpg_filname = "test.jpg";
 	//分配内存
 	video->jpg_pFormatCtx = avformat_alloc_context();
 	if (video->jpg_pFormatCtx == NULL) {
 		fprintf(stderr, "could not allocate AVFormatContex\n");
 		exit(0);
-	} else {
-		printf("allocate AVFormatContext success\n");
 	}
 
 	//猜测编码器
@@ -477,18 +518,9 @@ struct video_and_jpg *video_encode_init() {
 	if (jpg_fmt == NULL) {
 		fprintf(stderr, "Could not guess the format from file\n");
 		exit(0);
-	} else {
-		printf("guess the format from file success\n");
 	}
+
 	video->jpg_pFormatCtx->oformat = jpg_fmt;
-	//打开输出文件
-	jpg_ret = avio_open(&video->jpg_pFormatCtx->pb, jpg_filname, AVIO_FLAG_READ_WRITE);
-	if (ret < 0) {
-		fprintf(stderr, "could not open '%s': %s\n", jpg_filname, av_err2str(jpg_ret));
-		exit(0);
-	} else {
-		printf("open filename = %s success\n", jpg_filname);
-	}	
 
 	//新建一个图像的输出流
 	video->jpg_video_st = avformat_new_stream(video->jpg_pFormatCtx, 0);
@@ -507,7 +539,7 @@ struct video_and_jpg *video_encode_init() {
     video->jpg_pCodecCtx->time_base.num = time_num;    
     video->jpg_pCodecCtx->time_base.den = time_den;     
     //输出一些信息  
-    av_dump_format(video->jpg_pFormatCtx, 0, jpg_filname, 1);
+    //av_dump_format(video->jpg_pFormatCtx, 0, jpg_filname, 1);
 
 	jpg_pCodec = avcodec_find_encoder(video->jpg_pCodecCtx->codec_id);  
     if (!jpg_pCodec){  
@@ -528,20 +560,9 @@ struct video_and_jpg *video_encode_init() {
         exit(0); 
     }  
     avpicture_fill((AVPicture *)video->jpg_picture, jpg_picture_buf, 
-    	video->jpg_pCodecCtx->pix_fmt, video->jpg_pCodecCtx->width, video->jpg_pCodecCtx->height);  
-  
-    //Write Header  
-    jpg_ret = avformat_write_header(video->jpg_pFormatCtx,NULL);  
-	if (jpg_ret < 0) {
-		fprintf(stderr, "error occurred when opening outputfile: %s\n",
-				av_err2str(jpg_ret));
-		exit(0);
-	} else {
-		printf("write the header success\n");
-	}
+	video->jpg_pCodecCtx->pix_fmt, video->jpg_pCodecCtx->width, video->jpg_pCodecCtx->height);  
   
     video->jpg_y_size = video->jpg_pCodecCtx->width * video->jpg_pCodecCtx->height;  
-    av_new_packet(&video->jpg_pkt,video->jpg_y_size*3);
 
     return video;
 }
@@ -550,6 +571,10 @@ struct cam *cam_sys_init()
 {
 	struct cam *cam;
 	cam = calloc(1, sizeof(struct cam));
+
+	cam->epfd = epoll_create(20);
+
+	pthread_rwlock_init(&(cam->rwlock),NULL);
 
 	//初始化采集子系统
 	cam->v4_dev = v4l2_init();
@@ -563,6 +588,56 @@ struct cam *cam_sys_init()
 	return cam;
 }
 
+
+/*摄像头线程的运行程序
+*参数为摄像头子系统的结构
+*/
+void cam_process(void *arg)
+{
+	struct cam *c = arg;
+	struct epoll_event events[10];	
+	int fds;
+	int i;
+	struct event_ext *e;
+	uint32_t event;
+
+	//往Epoll池中加入事件
+	c->v4_dev->ev = epoll_event_create(c->v4_dev->fd, EPOLLIN, cam_handler, c->v4_dev);
+	epoll_add_event(c->epfd, c->v4_dev->ev);
+
+	//等待事件发生并处理
+	while(1)
+	{
+		fds = epoll_wait(c->epfd, events, 10, 1000);
+		for(i=0; i<fds; i++)
+		{
+			event = events[i].events;
+			e = events[i].data.ptr;
+
+			if((event & EPOLLIN) && (e->events & EPOLLIN))
+			{
+				e->handler(e->fd, e->arg);
+			}
+			if((event & EPOLLOUT) && (e->events & EPOLLOUT))
+			{
+				e->handler(e->fd, e->arg);
+			}
+			if((event & EPOLLERR) && (e->events & EPOLLERR))
+			{
+				e->handler(e->fd, e->arg);
+			}
+		}
+	}
+	//写视频文件尾
+	av_write_trailer(c->video->pFormatCtxEnc);	
+	if (!(c->video->pFormatCtxEnc->flags & AVFMT_NOFILE))
+		avio_close(c->video->pFormatCtxEnc->pb);
+
+ 	pthread_rwlock_destroy(&(c->rwlock));
+	//释放内存
+	free(c);
+
+}
 void cam_get_fmt(struct cam *v, __u8 *rsp)
 {
 	__u32 fmt = V4L2_PIX_FMT_JPEG;
@@ -571,8 +646,23 @@ void cam_get_fmt(struct cam *v, __u8 *rsp)
 
 __u32 cam_get_trans_frame(struct cam *v, __u8 *rsp)
 {
-	memcpy(rsp, v->tran_frm.start, v->tran_frm.len);
-	return v->tran_frm.len;
+	//读取文件长度
+	struct cam *cam = v;
+    __u32 filesize = -1;      
+    struct stat statbuff;
+    int fd;
+
+	pthread_rwlock_rdlock(&(cam->rwlock));
+     
+	if(stat("./test.jpg", &statbuff) >= 0)
+		filesize = statbuff.st_size;     
+	//拷贝数据到rsp中
+	fd = open("test.jpg", O_RDONLY);
+	read(fd, rsp, filesize);
+	close(fd);
+ 	pthread_rwlock_unlock(&(cam->rwlock));
+	// memcpy(rsp, v->tran_frm.start, v->tran_frm.len);
+	return filesize;
 }
 /*请求包处理函数
 形参：
@@ -617,3 +707,4 @@ int process_incoming(struct tcp_cli *c)
 
 	return status;
 }
+

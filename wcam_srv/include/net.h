@@ -8,6 +8,7 @@
 struct tcp_srv
 {
 	int sock;
+	int new_sock;
 	int epfd;
 	void *arg;
 };

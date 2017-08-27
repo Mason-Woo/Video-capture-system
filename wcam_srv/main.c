@@ -1,20 +1,9 @@
 #include <stdio.h>
 #include <unistd.h>
-#include <stdbool.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
 
 #include "main.h"
-
-
-struct event_ext
-{
-	int fd;//监控文件的fd
-	bool epolled;//事件是否在池中的标志
-	uint32_t events;//事件类型
-	void (*handler)(int fd, void *arg);//处理函数
-	void *arg;//处理函数的参数
-};
 
 //初始化事件的接口
 struct event_ext *epoll_event_create(int fd, uint32_t type, void (*handler)(int , void *), void *arg)
@@ -65,48 +54,44 @@ int epoll_del_event(int epfd, struct event_ext *ev)
 }
 
 
-//主函数负责连接新的客户机
+//主函数负责连接初始化并连接新的客户机
 //cam负责采集并压缩视频
 //net负责各个客户机的连接
 int main()
 {
-	struct epoll_event events[512];	
-	int fds;
-	int i;
-	uint32_t event;
-	struct event_ext *e;
+	struct sockaddr_in sin;
+	int new_sock;
+	int len=0;
 
 	srv_main = calloc(1,sizeof(struct server));
 
-	//创建Epoll
-	srv_main->epfd = epoll_create(512);
-	//子系统初始化
+	//初始化线程池
+	srv_main->pool = pool_init(10);
+	//初始化摄像头子系统
 	srv_main->cam = cam_sys_init();
+	// //初始化网络子系统
 	srv_main->srv = net_sys_init();
 
-	//等待事件发生并处理
+	//添加摄像头的任务
+	pool_add_task (cam_process, srv_main->cam); 
+
 	while(1)
 	{
-		fds = epoll_wait(srv_main->epfd, events, 512, 1000);
-		for(i=0; i<fds; i++)
+		//等待客户机连接
+		if(( srv_main->srv->new_sock = accept(srv_main->sock, (struct sockaddr*)&sin, &len)) == -1)
 		{
-			event = events[i].events;
-			e = events[i].data.ptr;
-
-			if((event & EPOLLIN) && (e->events & EPOLLIN))
-			{
-				e->handler(e->fd, e->arg);
-			}
-			if((event & EPOLLOUT) && (e->events & EPOLLOUT))
-			{
-				e->handler(e->fd, e->arg);
-			}
-			if((event & EPOLLERR) && (e->events & EPOLLERR))
-			{
-				e->handler(e->fd, e->arg);
-			}
+			perror("accept:");	
+			_exit(0);
 		}
+		//给线程池添加任务
+		pool_add_task(net_process,srv_main->srv);
 	}
+	//关闭线程池
+	pool_destroy();
+	//关闭sock
+	close(srv_main->srv->sock);
+	//释放申请到的内存
+	free(srv_main);
 
 	return -1;
 }

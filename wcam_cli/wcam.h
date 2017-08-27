@@ -15,7 +15,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-#define DEF_CONN_IP			"192.168.0.104"
+#define DEF_CONN_IP			"192.168.31.190"
 #define DEF_PORT			"19868"
 #define LOGO_IMG			"./icons/webcam_icon.png"
 #define LOGO_IMG1			"./icons/wcamclient.png"
